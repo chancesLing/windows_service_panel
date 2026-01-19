@@ -46,8 +46,8 @@ internal sealed class MainForm : Form
         Text = $"{_serviceDisplayName} 控制";
         StartPosition = FormStartPosition.CenterScreen;
         AutoScaleMode = AutoScaleMode.Dpi;
-        ClientSize = new Size(760, 420);
-        MinimumSize = new Size(760, 420);
+        ClientSize = new Size(760, 640);
+        MinimumSize = new Size(760, 600);
         BackColor = PageBackground;
         DoubleBuffered = true;
 
@@ -101,6 +101,8 @@ internal sealed class MainForm : Form
         card.Controls.Add(root);
         page.Controls.Add(card, 0, 0);
         Controls.Add(page);
+        _messagePanel.Resize += (_, _) => UpdateMessageWrapWidth();
+        UpdateMessageWrapWidth();
 
         _startButton.Click += async (_, _) => await StartServiceAsync();
         _restartButton.Click += async (_, _) => await RestartServiceAsync();
@@ -314,6 +316,7 @@ internal sealed class MainForm : Form
         {
             Dock = DockStyle.Fill,
             BackColor = Color.FromArgb(245, 247, 250),
+            AutoScroll = true,
             Padding = new Padding(14),
             Margin = new Padding(0),
         };
@@ -330,10 +333,12 @@ internal sealed class MainForm : Form
 
         messageValue = new Label
         {
-            Dock = DockStyle.Fill,
+            AutoSize = true,
+            Dock = DockStyle.Top,
             Text = "",
             ForeColor = TextMuted,
             Padding = new Padding(0),
+            Margin = new Padding(0),
         };
 
         msgPanel.Controls.Add(messageValue);
@@ -342,6 +347,19 @@ internal sealed class MainForm : Form
         outer.Controls.Add(msgPanel, 0, 1);
 
         return outer;
+    }
+
+    private void UpdateMessageWrapWidth()
+    {
+        var availableWidth = _messagePanel.ClientSize.Width - _messagePanel.Padding.Horizontal - SystemInformation.VerticalScrollBarWidth - 4;
+        if (availableWidth < 0)
+        {
+            availableWidth = 0;
+        }
+
+        _messageValue.MaximumSize = new Size(availableWidth, 0);
+        _messageValue.AutoEllipsis = false;
+        _messagePanel.PerformLayout();
     }
 
     private static void AddRow(TableLayoutPanel grid, int rowIndex, string labelText, Control valueControl, bool isKey = false)
@@ -659,6 +677,8 @@ internal sealed class MainForm : Form
         _messageValue.Text = message;
         _messageValue.ForeColor = isError ? Danger : TextMuted;
         _messagePanel.BackColor = isError ? Color.FromArgb(255, 235, 238) : Color.FromArgb(245, 247, 250);
+        _messagePanel.AutoScrollPosition = new Point(0, 0);
+        UpdateMessageWrapWidth();
     }
 
     private async Task StartServiceAsync()
