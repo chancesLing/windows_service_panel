@@ -1,12 +1,15 @@
 using System.Drawing;
 using System.Security.Principal;
 using System.ServiceProcess;
+using System.Text;
 
 namespace RestartWindowsService;
 
 internal sealed class MainForm : Form
 {
     private static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(30);
+    private const int LogTailMaxLines = 900;
+    private const int LogTailReadMaxBytes = 1024 * 1024;
 
     private static readonly Color PageBackground = Color.FromArgb(245, 247, 250);
     private static readonly Color CardBackground = Color.White;
@@ -26,16 +29,24 @@ internal sealed class MainForm : Form
     private readonly Label _adminValue;
     private readonly Label _messageValue;
     private readonly Panel _messagePanel;
+    private readonly TextBox _logTextBox;
+    private readonly Button _pickLogButton;
+    private readonly Label _logPathLabel;
 
     private readonly Button _startButton;
     private readonly Button _restartButton;
     private readonly Button _stopButton;
 
     private readonly System.Windows.Forms.Timer _refreshTimer;
+    private readonly System.Windows.Forms.Timer _logTimer;
 
     private bool _isBusy;
     private bool _isExiting;
     private NotifyIcon? _trayIcon;
+    private string? _logFilePath;
+    private long _logLastLength = -1;
+    private DateTime _logLastWriteTimeUtc = DateTime.MinValue;
+    private bool _isLogReading;
 
     public MainForm(string serviceName, string serviceDisplayName, bool autoStart)
     {
@@ -91,8 +102,8 @@ internal sealed class MainForm : Form
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
         var header = BuildHeader(_serviceDisplayName, _serviceManager.ServiceName);
-        var body = BuildBody(out _statusValue, out _adminValue, out _messagePanel, out _messageValue);
-        var footer = BuildFooter(out _startButton, out _restartButton, out _stopButton);
+        var body = BuildBody(out _statusValue, out _adminValue, out _messagePanel, out _messageValue, out _logTextBox);
+        var footer = BuildFooter(out _startButton, out _restartButton, out _stopButton, out _pickLogButton, out _logPathLabel);
 
         root.Controls.Add(header, 0, 0);
         root.Controls.Add(body, 0, 1);
@@ -107,9 +118,13 @@ internal sealed class MainForm : Form
         _startButton.Click += async (_, _) => await StartServiceAsync();
         _restartButton.Click += async (_, _) => await RestartServiceAsync();
         _stopButton.Click += async (_, _) => await StopServiceAsync();
+        _pickLogButton.Click += (_, _) => PickLogFile();
 
         _refreshTimer = new System.Windows.Forms.Timer { Interval = 1200 };
         _refreshTimer.Tick += (_, _) => RefreshUi();
+
+        _logTimer = new System.Windows.Forms.Timer { Interval = 1200 };
+        _logTimer.Tick += (_, _) => _ = RefreshLogTailAsync();
 
         Shown += async (_, _) =>
         {
@@ -220,7 +235,7 @@ internal sealed class MainForm : Form
         return panel;
     }
 
-    private Control BuildBody(out Label statusValue, out Label adminValue, out Panel messagePanel, out Label messageValue)
+    private Control BuildBody(out Label statusValue, out Label adminValue, out Panel messagePanel, out Label messageValue, out TextBox logTextBox)
     {
         var outer = new TableLayoutPanel
         {
@@ -341,7 +356,45 @@ internal sealed class MainForm : Form
             Margin = new Padding(0),
         };
 
-        msgPanel.Controls.Add(messageValue);
+        var logHeader = new Label
+        {
+            AutoSize = true,
+            Dock = DockStyle.Top,
+            Text = "日志（tail）",
+            ForeColor = TextMuted,
+            Padding = new Padding(0, 12, 0, 6),
+            Margin = new Padding(0),
+        };
+
+        logTextBox = new TextBox
+        {
+            Multiline = true,
+            ReadOnly = true,
+            Dock = DockStyle.Fill,
+            ScrollBars = ScrollBars.Both,
+            WordWrap = false,
+            BackColor = Color.White,
+            BorderStyle = BorderStyle.FixedSingle,
+            Font = new Font("Consolas", 9f),
+        };
+
+        var layout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 3,
+            BackColor = Color.Transparent,
+            Margin = new Padding(0),
+            Padding = new Padding(0),
+        };
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        layout.Controls.Add(messageValue, 0, 0);
+        layout.Controls.Add(logHeader, 0, 1);
+        layout.Controls.Add(logTextBox, 0, 2);
+
+        msgPanel.Controls.Add(layout);
 
         outer.Controls.Add(infoCard, 0, 0);
         outer.Controls.Add(msgPanel, 0, 1);
@@ -383,7 +436,7 @@ internal sealed class MainForm : Form
         grid.Controls.Add(valueControl, 1, rowIndex);
     }
 
-    private static Control BuildFooter(out Button startButton, out Button restartButton, out Button stopButton)
+    private static Control BuildFooter(out Button startButton, out Button restartButton, out Button stopButton, out Button pickLogButton, out Label logPathLabel)
     {
         var panel = new TableLayoutPanel
         {
@@ -441,7 +494,55 @@ internal sealed class MainForm : Form
         buttons.Controls.Add(start);
         buttons.SetFlowBreak(start, false);
 
-        panel.Controls.Add(new Panel { Dock = DockStyle.Fill }, 0, 0);
+        var left = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = false,
+            WrapContents = false,
+            FlowDirection = FlowDirection.LeftToRight,
+            Margin = new Padding(0),
+            Padding = new Padding(0, 8, 0, 0),
+        };
+
+        var logLabel = new Label
+        {
+            AutoSize = true,
+            Text = "日志：",
+            ForeColor = TextMuted,
+            Padding = new Padding(0, 6, 0, 0),
+            Margin = new Padding(0, 0, 8, 0),
+        };
+
+        logPathLabel = new Label
+        {
+            AutoSize = false,
+            Text = "未选择",
+            ForeColor = TextPrimary,
+            Width = 360,
+            Height = 28,
+            TextAlign = ContentAlignment.MiddleLeft,
+            AutoEllipsis = true,
+            Margin = new Padding(0, 0, 10, 0),
+        };
+
+        pickLogButton = new Button
+        {
+            Text = "选择日志…",
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            MinimumSize = new Size(112, 38),
+            Padding = new Padding(12, 7, 12, 7),
+        };
+
+        ApplyButtonStyle(pickLogButton, ButtonVisualKind.Secondary);
+        pickLogButton.Font = new Font(Control.DefaultFont.FontFamily, 9.5f, FontStyle.Bold);
+        pickLogButton.Margin = new Padding(0);
+
+        left.Controls.Add(logLabel);
+        left.Controls.Add(logPathLabel);
+        left.Controls.Add(pickLogButton);
+
+        panel.Controls.Add(left, 0, 0);
         panel.Controls.Add(buttons, 1, 0);
 
         ApplyButtonStyle(start, ButtonVisualKind.Primary);
@@ -677,8 +778,168 @@ internal sealed class MainForm : Form
         _messageValue.Text = message;
         _messageValue.ForeColor = isError ? Danger : TextMuted;
         _messagePanel.BackColor = isError ? Color.FromArgb(255, 235, 238) : Color.FromArgb(245, 247, 250);
-        _messagePanel.AutoScrollPosition = new Point(0, 0);
         UpdateMessageWrapWidth();
+    }
+
+    private void PickLogFile()
+    {
+        using var dialog = new OpenFileDialog
+        {
+            Title = "选择日志文件",
+            Filter = "日志文件 (*.log;*.txt)|*.log;*.txt|所有文件 (*.*)|*.*",
+            Multiselect = false,
+            CheckFileExists = true,
+        };
+
+        if (!string.IsNullOrWhiteSpace(_logFilePath))
+        {
+            var dir = Path.GetDirectoryName(_logFilePath);
+            if (!string.IsNullOrWhiteSpace(dir) && Directory.Exists(dir))
+            {
+                dialog.InitialDirectory = dir;
+            }
+        }
+
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+        {
+            return;
+        }
+
+        _logFilePath = dialog.FileName;
+        _logPathLabel.Text = _logFilePath;
+        _logLastLength = -1;
+        _logLastWriteTimeUtc = DateTime.MinValue;
+        _logTextBox.Text = "";
+        _logTimer.Start();
+        _ = RefreshLogTailAsync(force: true);
+    }
+
+    private async Task RefreshLogTailAsync(bool force = false)
+    {
+        if (string.IsNullOrWhiteSpace(_logFilePath))
+        {
+            return;
+        }
+
+        if (_isLogReading)
+        {
+            return;
+        }
+
+        _isLogReading = true;
+        try
+        {
+            var fileInfo = new FileInfo(_logFilePath);
+            if (!fileInfo.Exists)
+            {
+                _logTextBox.Text = $"日志文件不存在：{_logFilePath}";
+                _logTimer.Stop();
+                return;
+            }
+
+            var length = fileInfo.Length;
+            var writeTimeUtc = fileInfo.LastWriteTimeUtc;
+            if (!force && length == _logLastLength && writeTimeUtc == _logLastWriteTimeUtc)
+            {
+                return;
+            }
+
+            _logLastLength = length;
+            _logLastWriteTimeUtc = writeTimeUtc;
+
+            var text = await Task.Run(() => ReadTailLines(_logFilePath, LogTailMaxLines, LogTailReadMaxBytes));
+            if (!string.Equals(_logTextBox.Text, text, StringComparison.Ordinal))
+            {
+                _logTextBox.Text = text;
+                _logTextBox.SelectionStart = _logTextBox.TextLength;
+                _logTextBox.SelectionLength = 0;
+                _logTextBox.ScrollToCaret();
+            }
+        }
+        catch (Exception ex)
+        {
+            _logTextBox.Text = ex.Message;
+        }
+        finally
+        {
+            _isLogReading = false;
+        }
+    }
+
+    private static string ReadTailLines(string path, int maxLines, int maxBytes)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        var length = stream.Length;
+        var start = Math.Max(0, length - maxBytes);
+        stream.Seek(start, SeekOrigin.Begin);
+
+        var readLength = (int)Math.Min(maxBytes, length - start);
+        var buffer = new byte[readLength];
+        var totalRead = 0;
+        while (totalRead < readLength)
+        {
+            var read = stream.Read(buffer, totalRead, readLength - totalRead);
+            if (read <= 0)
+            {
+                break;
+            }
+            totalRead += read;
+        }
+
+        if (totalRead <= 0)
+        {
+            return "";
+        }
+
+        var text = DecodeText(buffer.AsSpan(0, totalRead).ToArray());
+        if (start > 0)
+        {
+            var cut = text.IndexOf('\n');
+            if (cut >= 0 && cut + 1 < text.Length)
+            {
+                text = text[(cut + 1)..];
+            }
+        }
+
+        text = text.Replace("\r\n", "\n").Replace('\r', '\n');
+        var lines = text.Split('\n', StringSplitOptions.None);
+        var take = Math.Min(maxLines, lines.Length);
+        var startLine = Math.Max(0, lines.Length - take);
+        return string.Join(Environment.NewLine, lines, startLine, lines.Length - startLine);
+    }
+
+    private static string DecodeText(byte[] bytes)
+    {
+        string utf8Text;
+        using (var ms = new MemoryStream(bytes))
+        using (var reader = new StreamReader(ms, Encoding.UTF8, detectEncodingFromByteOrderMarks: true))
+        {
+            utf8Text = reader.ReadToEnd();
+        }
+
+        var replacementCount = 0;
+        foreach (var ch in utf8Text)
+        {
+            if (ch == '\uFFFD')
+            {
+                replacementCount++;
+            }
+        }
+
+        if (replacementCount <= 0)
+        {
+            return utf8Text;
+        }
+
+        var ratio = (double)replacementCount / Math.Max(1, utf8Text.Length);
+        if (ratio < 0.01)
+        {
+            return utf8Text;
+        }
+
+        using var ms2 = new MemoryStream(bytes);
+        using var reader2 = new StreamReader(ms2, Encoding.Default, detectEncodingFromByteOrderMarks: true);
+        return reader2.ReadToEnd();
     }
 
     private async Task StartServiceAsync()
