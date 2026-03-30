@@ -8,8 +8,9 @@ namespace RestartWindowsService;
 internal sealed class MainForm : Form
 {
     private static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(30);
-    private const int LogTailMaxLines = 900;
-    private const int LogTailReadMaxBytes = 1024 * 1024;
+    private const int LogTailMaxLines = 200;
+    private const int LogTailReadMaxBytes = 512 * 1024;
+    private const int LogTextBoxMaxLength = 50000;
 
     private static readonly Color PageBackground = Color.FromArgb(245, 247, 250);
     private static readonly Color CardBackground = Color.White;
@@ -36,6 +37,13 @@ internal sealed class MainForm : Form
     private readonly Button _startButton;
     private readonly Button _restartButton;
     private readonly Button _stopButton;
+    private readonly Button _actionButton;
+    private readonly Control _logPanel;
+
+    private readonly Panel _contentPanel;
+    private readonly Control _mainPage;
+    private readonly Control _actionPage;
+    private bool _isActionPageVisible;
 
     private readonly System.Windows.Forms.Timer _refreshTimer;
     private readonly System.Windows.Forms.Timer _logTimer;
@@ -57,8 +65,8 @@ internal sealed class MainForm : Form
         Text = $"{_serviceDisplayName} 控制";
         StartPosition = FormStartPosition.CenterScreen;
         AutoScaleMode = AutoScaleMode.Dpi;
-        ClientSize = new Size(760, 640);
-        MinimumSize = new Size(760, 600);
+        ClientSize = new Size(912, 640);
+        MinimumSize = new Size(912, 600);
         BackColor = PageBackground;
         DoubleBuffered = true;
 
@@ -99,14 +107,33 @@ internal sealed class MainForm : Form
         };
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 100));
 
         var header = BuildHeader(_serviceDisplayName, _serviceManager.ServiceName);
-        var body = BuildBody(out _statusValue, out _adminValue, out _messagePanel, out _messageValue, out _logTextBox);
-        var footer = BuildFooter(out _startButton, out _restartButton, out _stopButton, out _pickLogButton, out _logPathLabel);
+        var footer = BuildFooter(out _startButton, out _restartButton, out _stopButton, out _actionButton, out _pickLogButton, out _logPathLabel, out _logPanel);
+
+        // 内容面板 - 用于切换页面
+        _contentPanel = new Panel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = CardBackground,
+            Margin = new Padding(0),
+            Padding = new Padding(0),
+        };
+
+        // 主页面
+        _mainPage = BuildMainPage(out _statusValue, out _adminValue, out _messagePanel, out _messageValue, out _logTextBox);
+        _mainPage.Dock = DockStyle.Fill;
+
+        // 操作页面（从单独文件加载）
+        _actionPage = new ActionPage();
+        _actionPage.Visible = false;
+
+        _contentPanel.Controls.Add(_mainPage);
+        _contentPanel.Controls.Add(_actionPage);
 
         root.Controls.Add(header, 0, 0);
-        root.Controls.Add(body, 0, 1);
+        root.Controls.Add(_contentPanel, 0, 1);
         root.Controls.Add(footer, 0, 2);
 
         card.Controls.Add(root);
@@ -119,11 +146,12 @@ internal sealed class MainForm : Form
         _restartButton.Click += async (_, _) => await RestartServiceAsync();
         _stopButton.Click += async (_, _) => await StopServiceAsync();
         _pickLogButton.Click += (_, _) => PickLogFile();
+        _actionButton.Click += (_, _) => ToggleActionPage();
 
         _refreshTimer = new System.Windows.Forms.Timer { Interval = 1200 };
         _refreshTimer.Tick += (_, _) => RefreshUi();
 
-        _logTimer = new System.Windows.Forms.Timer { Interval = 1200 };
+        _logTimer = new System.Windows.Forms.Timer { Interval = 3000 };
         _logTimer.Tick += (_, _) => _ = RefreshLogTailAsync();
 
         Shown += async (_, _) =>
@@ -235,7 +263,7 @@ internal sealed class MainForm : Form
         return panel;
     }
 
-    private Control BuildBody(out Label statusValue, out Label adminValue, out Panel messagePanel, out Label messageValue, out TextBox logTextBox)
+    private Control BuildMainPage(out Label statusValue, out Label adminValue, out Panel messagePanel, out Label messageValue, out TextBox logTextBox)
     {
         var outer = new TableLayoutPanel
         {
@@ -376,6 +404,7 @@ internal sealed class MainForm : Form
             BackColor = Color.White,
             BorderStyle = BorderStyle.FixedSingle,
             Font = new Font("Consolas", 9f),
+            MaxLength = LogTextBoxMaxLength * 2,
         };
 
         var layout = new TableLayoutPanel
@@ -400,6 +429,49 @@ internal sealed class MainForm : Form
         outer.Controls.Add(msgPanel, 0, 1);
 
         return outer;
+    }
+
+
+
+    private void ToggleActionPage()
+    {
+        _isActionPageVisible = !_isActionPageVisible;
+
+        if (_isActionPageVisible)
+        {
+            _mainPage.Visible = false;
+            _actionPage.Visible = true;
+            _actionButton.Text = "返回";
+
+            // 隐藏服务操作按钮和日志区域
+            _startButton.Visible = false;
+            _restartButton.Visible = false;
+            _stopButton.Visible = false;
+            _pickLogButton.Visible = false;
+            _logPanel.Visible = false;
+
+            // 暂停主页面相关的定时器
+            _refreshTimer?.Stop();
+            _logTimer?.Stop();
+        }
+        else
+        {
+            _actionPage.Visible = false;
+            _mainPage.Visible = true;
+            _actionButton.Text = "操作";
+
+            // 显示服务操作按钮和日志区域
+            _startButton.Visible = true;
+            _restartButton.Visible = true;
+            _stopButton.Visible = true;
+            _pickLogButton.Visible = true;
+            _logPanel.Visible = true;
+
+            // 恢复主页面相关的定时器
+            _refreshTimer?.Start();
+            _logTimer?.Start();
+            RefreshUi();
+        }
     }
 
     private void UpdateMessageWrapWidth()
@@ -436,7 +508,7 @@ internal sealed class MainForm : Form
         grid.Controls.Add(valueControl, 1, rowIndex);
     }
 
-    private static Control BuildFooter(out Button startButton, out Button restartButton, out Button stopButton, out Button pickLogButton, out Label logPathLabel)
+    private static Control BuildFooter(out Button startButton, out Button restartButton, out Button stopButton, out Button actionButton, out Button pickLogButton, out Label logPathLabel, out Control logPanel)
     {
         var panel = new TableLayoutPanel
         {
@@ -456,8 +528,8 @@ internal sealed class MainForm : Form
             Text = "停止",
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            MinimumSize = new Size(112, 44),
-            Padding = new Padding(14, 9, 14, 9),
+            MinimumSize = new Size(72, 35),
+            Padding = new Padding(12, 7, 12, 7),
         };
 
         var restart = new Button
@@ -465,8 +537,8 @@ internal sealed class MainForm : Form
             Text = "重启",
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            MinimumSize = new Size(112, 44),
-            Padding = new Padding(14, 9, 14, 9),
+            MinimumSize = new Size(72, 35),
+            Padding = new Padding(12, 7, 12, 7),
         };
 
         var start = new Button
@@ -474,8 +546,17 @@ internal sealed class MainForm : Form
             Text = "启动",
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            MinimumSize = new Size(112, 44),
-            Padding = new Padding(14, 9, 14, 9),
+            MinimumSize = new Size(72, 35),
+            Padding = new Padding(12, 7, 12, 7),
+        };
+
+        var action = new Button
+        {
+            Text = "操作",
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            MinimumSize = new Size(72, 35),
+            Padding = new Padding(12, 7, 12, 7),
         };
 
         var buttons = new FlowLayoutPanel
@@ -492,7 +573,8 @@ internal sealed class MainForm : Form
         buttons.Controls.Add(stop);
         buttons.Controls.Add(restart);
         buttons.Controls.Add(start);
-        buttons.SetFlowBreak(start, false);
+        buttons.Controls.Add(action);
+        buttons.SetFlowBreak(action, false);
 
         var left = new FlowLayoutPanel
         {
@@ -530,17 +612,18 @@ internal sealed class MainForm : Form
             Text = "选择日志…",
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            MinimumSize = new Size(112, 38),
+            MinimumSize = new Size(72, 35),
             Padding = new Padding(12, 7, 12, 7),
         };
 
         ApplyButtonStyle(pickLogButton, ButtonVisualKind.Secondary);
-        pickLogButton.Font = new Font(Control.DefaultFont.FontFamily, 9.5f, FontStyle.Bold);
-        pickLogButton.Margin = new Padding(0);
 
         left.Controls.Add(logLabel);
         left.Controls.Add(logPathLabel);
-        left.Controls.Add(pickLogButton);
+
+        // 将选择日志按钮放在右侧按钮组，与其他按钮视觉统一
+        pickLogButton.Margin = new Padding(0, 0, 12, 0);
+        buttons.Controls.Add(pickLogButton);
 
         panel.Controls.Add(left, 0, 0);
         panel.Controls.Add(buttons, 1, 0);
@@ -548,10 +631,13 @@ internal sealed class MainForm : Form
         ApplyButtonStyle(start, ButtonVisualKind.Primary);
         ApplyButtonStyle(restart, ButtonVisualKind.Secondary);
         ApplyButtonStyle(stop, ButtonVisualKind.Danger);
+        ApplyButtonStyle(action, ButtonVisualKind.Secondary);
 
         stopButton = stop;
         restartButton = restart;
         startButton = start;
+        actionButton = action;
+        logPanel = left;
 
         return panel;
     }
@@ -848,13 +934,52 @@ internal sealed class MainForm : Form
             _logLastWriteTimeUtc = writeTimeUtc;
 
             var text = await Task.Run(() => ReadTailLines(_logFilePath, LogTailMaxLines, LogTailReadMaxBytes));
-            if (!string.Equals(_logTextBox.Text, text, StringComparison.Ordinal))
+            
+            // 截断超长文本
+            if (text.Length > LogTextBoxMaxLength)
+            {
+                text = text.Substring(text.Length - LogTextBoxMaxLength);
+                // 找到第一个换行符，确保从完整行开始
+                var firstNewLine = text.IndexOf('\n');
+                if (firstNewLine > 0)
+                {
+                    text = text.Substring(firstNewLine + 1);
+                }
+            }
+
+            // 使用AppendText增量更新，避免替换整个文本导致的闪烁
+            if (_logTextBox.Text.Length == 0 || force)
             {
                 _logTextBox.Text = text;
-                _logTextBox.SelectionStart = _logTextBox.TextLength;
-                _logTextBox.SelectionLength = 0;
-                _logTextBox.ScrollToCaret();
             }
+            else
+            {
+                // 只追加新内容
+                var currentText = _logTextBox.Text;
+                var newContent = text;
+                
+                // 如果内容变化较大（超过50%），直接替换
+                if (newContent.Length > currentText.Length * 1.5 || 
+                    !newContent.EndsWith(currentText.Substring(Math.Max(0, currentText.Length - 100))))
+                {
+                    _logTextBox.Text = newContent;
+                }
+                else if (newContent.Length > currentText.Length)
+                {
+                    // 追加新增部分
+                    var appendText = newContent.Substring(currentText.Length);
+                    _logTextBox.AppendText(appendText);
+                }
+                else if (newContent != currentText)
+                {
+                    _logTextBox.Text = newContent;
+                }
+            }
+
+            // 保持滚动到底部
+            _logTextBox.SelectionStart = _logTextBox.TextLength;
+            _logTextBox.SelectionLength = 0;
+            _logTextBox.ScrollToCaret();
         }
         catch (Exception ex)
         {
