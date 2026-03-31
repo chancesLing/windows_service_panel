@@ -573,7 +573,8 @@ internal sealed class MainForm : Form
         buttons.Controls.Add(stop);
         buttons.Controls.Add(restart);
         buttons.Controls.Add(start);
-        buttons.Controls.Add(action);
+        // 注释掉操作按钮，因为广船不需要
+        //buttons.Controls.Add(action);
         buttons.SetFlowBreak(action, false);
 
         var left = new FlowLayoutPanel
